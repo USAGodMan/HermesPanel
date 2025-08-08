@@ -80,7 +80,7 @@ The recommended way to get started is by using Docker Compose for a one-click de
 4.  **Access the panel**:
     Open your web browser and navigate to `https://your-domain.com` to see the HermesPanel login page.
 
-For more detailed installation and configuration instructions, please refer to our [**Wiki**](https://github.com/yourusername/HermesPanel/wiki).
+For more detailed installation and configuration instructions, please refer to our [**Wiki**](https://github.com/Hermes-Panel/HermesPanel/wiki).
 
 ## 🤝 Contributing
 
