@@ -1,3 +1,4 @@
+<p align="right">English | <a href="./README.md">中文 (Chinese)</a> | <a href="./README.ja.md">日本語 (Japanese)</a></p>
 # HermesPanel - High-Performance Traffic Orchestration & Forwarding Dashboard
 <p align="center">
   <strong>A modern, feature-rich traffic tunneling and port forwarding management panel, engineered for high availability, flexibility, and granular traffic control.</strong>
