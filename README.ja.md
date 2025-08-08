@@ -83,7 +83,7 @@
 4.  **パネルにアクセス**:
     ブラウザで `https://あなたのドメイン` にアクセスすると、HermesPanelのログイン画面が表示されます。
 
-より詳細なインストールと設定ガイドについては、[**Wikiドキュメント**](https://github.com/Hermes-Panel/hermes/wiki/)を参照してください。
+より詳細なインストールと設定ガイドについては、[**Wikiドキュメント**](https://github.com/Hermes-Panel/HermesPanel/wiki/)を参照してください。
 
 ## 🤝 コントリビュート
 
