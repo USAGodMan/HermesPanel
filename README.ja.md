@@ -3,11 +3,6 @@
 ---
 
 # HermesPanel - 高性能トラフィックオーケストレーション＆ポートフォワーディング管理パネル
-
-<p align="center">
-  <img src="https://your-image-url/hermes-logo.png" alt="HermesPanel Logo" width="150"/>
-</p>
-
 <p align="center">
   <strong>高可用性、柔軟性、そして詳細なトラフィック制御が求められるシーンのために設計された、モダンで機能豊富なトラフィック転送・ポートフォワーディング管理パネルです。</strong>
 </p>
