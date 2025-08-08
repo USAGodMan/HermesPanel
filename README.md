@@ -1,3 +1,6 @@
+<p align="right"><a href="./README.en.md">English</a> | 中文</p>
+
+---
 # HermesPanel - 高性能流量调度与端口转发管理面板
 <p align="center">
   <strong>一个现代化、功能丰富的流量中转与端口转发管理面板，专为需要高可用性、灵活性和精细化流量控制的场景而设计。</strong>
