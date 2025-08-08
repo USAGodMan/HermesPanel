@@ -1,4 +1,4 @@
-<p align="right"><a href="./README.en.md">English</a> | 中文</p>
+<p align="right"><a href="./README.en.md">English</a> | 中文 | <a href="./README.ja.md">日本語</a></p>
 
 ---
 # HermesPanel - 高性能流量调度与端口转发管理面板
