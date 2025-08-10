@@ -1,0 +1,119 @@
+# frontend/nginx.conf.template (修正版)
+
+upstream grpc_backend {
+    # 将流量转发给 backend 服务的 50051 端口
+    server backend:50051;
+}
+
+server {
+    # 在 50051 端口上监听 gRPC 流量
+    listen 50051 ssl;
+    http2 on;
+    server_name ${NGIN-X_HOST} grpc.${NGINX_HOST};
+
+    # 使用与主站相同的证书
+    ssl_certificate /etc/letsencrypt/live/${NGINX_HOST}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${NGINX_HOST}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # 代理 gRPC 请求
+    location / {
+        grpc_pass grpc://grpc_backend;
+        # 设置必要的头信息
+        grpc_set_header Host $host;
+        grpc_set_header X-Real-IP $remote_addr;
+        grpc_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        grpc_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# --- HTTP 到 HTTPS 的永久重定向 ---
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${NGINX_HOST};
+
+    # 推荐：为 acme-challenge (Let's Encrypt 续期) 设置一个例外
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+
+# --- HTTPS 主服务配置 ---
+server {
+    # 【核心】监听 443 端口并启用 SSL/TLS
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    
+    server_name ${NGINX_HOST};
+
+    # 【核心】指定证书和私钥的路径 (这些路径是容器内的路径)
+    ssl_certificate /etc/letsencrypt/live/${NGINX_HOST}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${NGINX_HOST}/privkey.pem;
+
+    # --- SSL/TLS 安全增强配置 (推荐) ---
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:ECDHE-RSA-AES128-GCM-SHA256';
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    resolver 8.8.8.8 1.1.1.1 valid=300s;
+    resolver_timeout 5s;
+
+    server_tokens off;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # --- 性能优化：Gzip 压缩 ---
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+    gzip_min_length 1000;
+    gzip_disable "msie6";
+
+    # --- 静态资源处理与缓存 ---
+    # 【核心修正】将静态资源 location 块移到外部，与 location / 平级
+
+    # 为文件名中带有哈希值的文件 (如 main.a1b2c3d4.js) 设置长缓存
+    location ~* \.(?:css|js)$ {
+        expires 1y;
+        add_header Cache-Control "public";
+        # 因为这些文件是物理存在的，所以不需要 try_files 回退
+        # 如果文件不存在，Nginx 会自动返回 404
+    }
+
+    # 为图片等其他媒体资源设置缓存
+    location ~* \.(?:ico|jpg|jpeg|png|gif|svg|webp)$ {
+        expires 1d;
+        add_header Cache-Control "public";
+    }
+
+    # --- SPA 路由回退 ---
+    # 这个 location 块应该放在所有静态资源 location 之后
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # --- API 和 WebSocket 代理 ---
+    location /api/v1 {
+        proxy_pass http://backend:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
