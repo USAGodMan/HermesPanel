@@ -1,0 +1,83 @@
+# docker-compose.yml
+services:
+  # ----------------------------------------------------
+  # 后端 Go 服务
+  # ----------------------------------------------------
+  backend:
+    image: goliayo/hermes-backend:v1.1.0
+    container_name: hermes-backend
+    restart: unless-stopped
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - NGINX_HOST=${NGINX_HOST}
+      - DB_TYPE=${DB_TYPE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - GRPC_PORT=50051
+      - HTTP_PORT=8080
+      - AES_ENCRYPTION_KEY=${AES_ENCRYPTION_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - GIN_MODE=release
+      - TZ=Asia/Hong_Kong
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - hermes-net
+
+  # ----------------------------------------------------
+  # Nginx 网关服务 (已优化)
+  # - 作为唯一的流量入口 (80, 443)
+  # - 移除 50051 端口暴露
+  # ----------------------------------------------------
+  frontend:
+    image: goliayo/hermes-frontend:v1.0.1
+    container_name: hermes-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - /etc/letsencrypt/live/${NGINX_HOST}:/etc/letsencrypt/live/${NGINX_HOST}:ro
+      - /etc/letsencrypt/archive/${NGINX_HOST}:/etc/letsencrypt/archive/${NGINX_HOST}:ro
+      - /var/www/certbot:/var/www/certbot:ro
+    depends_on:
+      - backend
+    networks:
+      - hermes-net
+    environment:
+      - NGINX_HOST=${NGINX_HOST}
+
+  # ----------------------------------------------------
+  # MySQL 数据库服务
+  # ----------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: hermes-mysql
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hermes-net
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  mysql_data:
+    driver: local
