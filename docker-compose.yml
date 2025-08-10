@@ -4,7 +4,7 @@ services:
   # 后端 Go 服务
   # ----------------------------------------------------
   backend:
-    image: goliayo/hermes-backend:v1.1.0
+    image: goliayo/hermes-backend:latest
     container_name: hermes-backend
     restart: unless-stopped
     volumes:
@@ -28,12 +28,10 @@ services:
       - hermes-net
 
   # ----------------------------------------------------
-  # Nginx 网关服务 (已优化)
-  # - 作为唯一的流量入口 (80, 443)
-  # - 移除 50051 端口暴露
+  # Nginx 网关服务
   # ----------------------------------------------------
   frontend:
-    image: goliayo/hermes-frontend:v1.0.1
+    image: goliayo/hermes-frontend:latest
     container_name: hermes-frontend
     restart: unless-stopped
     ports:
