@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ==============================================================================
-# 🚀 Hermes Agent 一键安装与管理脚本 (v2.4 - 标准化信任模型)
+# 🚀 Hermes Agent 一键安装与管理脚本 (v2.5 - 稳定隧道版)
 #
 # 核心变更:
-# - [移除] 不再处理或安装任何 CA 证书。Agent 将依赖其操作系统的系统信任库。
-# - [移除] 生成的 agent-config.json 中不再包含 'ca_cert_path' 字段。
+# - [移除] 移除了所有与 H2 隧道和 MUX (复用) 相关的功能、参数和配置项。
+# - [聚焦] 脚本现在只支持基础的 TLS/WS 隧道，专注于稳定性和兼容性。
 # ==============================================================================
 
 # --- 全局变量和默认值 ---
@@ -26,15 +26,8 @@ SERVICE_NAME="hermes-agent"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DEPS="curl jq systemd" 
 
-# 新增：可选配置项的默认值（与 Agent 默认保持一致）
-ENABLE_H2_TUNNEL="false"
-TUNNEL_WS_PORT="0"
-ENABLE_TUNNEL_MUX="false"
-UDPH2_IDLE_TIMEOUT="3"
-UDPH2_SWEEP_INTERVAL="5"
-UDPH2_MAX_SESSIONS="4096"
-H2_EGRESS_LIMIT_UP="0"
-H2_EGRESS_LIMIT_DOWN="0"
+# --- 【核心修改 1】: 移除所有 H2 和 MUX 相关的默认值 ---
+TUNNEL_WS_PORT="0" # 只保留 WS 端口配置
 
 # --- 工具函数 (已添加 Emoji) ---
 log_info() { echo -e "${GREEN}[INFO]${NC} ✨ $1"; }
@@ -47,10 +40,10 @@ init_sudo() { SUDO=""; if [ "$(id -u)" -ne 0 ]; then if ! command_exists sudo; t
 usage() {
     echo -e "📋 用法: $0 [命令] [选项]"
     echo "   命令: install (默认), uninstall, version"
-    echo "   选项: --key, --server, --version, --no-start, --non-interactive, --help"
-    echo "   高级: --enable-h2 (启用 H2 隧道) --tunnel-ws-port <端口> --enable-tunnel-mux"
-    echo "         --udp-h2-idle <秒> --udp-h2-sweep <秒> --udp-h2-max <数量>"
-    echo "         --h2-egress-up-mbps <Mbps> --h2-egress-down-mbps <Mbps>"
+    # --- 【核心修改 2】: 大幅简化选项说明 ---
+    echo "   选项: --key <密钥>, --server <地址>, --version <版本>"
+    echo "         --no-start, --non-interactive, --help"
+    echo "   高级: --tunnel-ws-port <端口>"
     exit 0
 }
 
@@ -77,6 +70,7 @@ create_config() {
     if [ -z "$BACKEND_ADDRESS" ] || [ -z "$SECRET_KEY" ]; then log_error "后端地址和密钥是必填项。"; fi
     log_info "📝 正在创建配置文件: ${CONFIG_FILE}"; $SUDO mkdir -p "$CONFIG_DIR"; $SUDO chmod 755 "$CONFIG_DIR"
     
+    # --- 【核心修改 3】: 生成简化的配置文件 ---
     $SUDO tee "$CONFIG_FILE" > /dev/null << EOF
 {
   "backend_address": "${BACKEND_ADDRESS}",
@@ -85,14 +79,7 @@ create_config() {
   "log_level": "info",
   "log_format": "json",
   "insecure_skip_verify": false,
-  "enable_h2_tunnel": ${ENABLE_H2_TUNNEL},
-  "tunnel_ws_port": ${TUNNEL_WS_PORT},
-  "enable_tunnel_mux": ${ENABLE_TUNNEL_MUX},
-  "udp_h2_idle_timeout_seconds": ${UDPH2_IDLE_TIMEOUT},
-  "udp_h2_sweep_interval_seconds": ${UDPH2_SWEEP_INTERVAL},
-  "udp_h2_max_sessions": ${UDPH2_MAX_SESSIONS},
-  "h2_egress_limit_up_mbps": ${H2_EGRESS_LIMIT_UP},
-  "h2_egress_limit_down_mbps": ${H2_EGRESS_LIMIT_DOWN}
+  "tunnel_ws_port": ${TUNNEL_WS_PORT}
 }
 EOF
     $SUDO chmod 644 "$CONFIG_FILE";
@@ -141,17 +128,27 @@ do_uninstall() {
 # --- 主逻辑 ---
 main() {
     init_sudo; COMMAND="install"; if [[ "$1" == "uninstall" || "$1" == "version" ]]; then COMMAND=$1; shift; fi
-    while [ "$#" -gt 0 ]; do case "$1" in --key) SECRET_KEY="$2"; shift 2;; --server) BACKEND_ADDRESS="$2"; shift 2;; --version) AGENT_VERSION="$2"; shift 2;; --no-start) NO_START="true"; shift 1;; --non-interactive) NON_INTERACTIVE="true"; shift 1;; \
-        --enable-h2) ENABLE_H2_TUNNEL="true"; shift 1;; \
-        --tunnel-ws-port) TUNNEL_WS_PORT="$2"; shift 2;; \
-        --enable-tunnel-mux) ENABLE_TUNNEL_MUX="true"; shift 1;; \
-        --udp-h2-idle) UDPH2_IDLE_TIMEOUT="$2"; shift 2;; \
-        --udp-h2-sweep) UDPH2_SWEEP_INTERVAL="$2"; shift 2;; \
-        --udp-h2-max) UDPH2_MAX_SESSIONS="$2"; shift 2;; \
-        --h2-egress-up-mbps) H2_EGRESS_LIMIT_UP="$2"; shift 2;; \
-        --h2-egress-down-mbps) H2_EGRESS_LIMIT_DOWN="$2"; shift 2;; \
-        -h|--help) usage;; *) log_error "未知参数: $1";; esac; done
-    case "$COMMAND" in install) do_install_or_update;; uninstall) do_uninstall;; version) ${INSTALL_PATH}/${AGENT_BINARY_NAME} --version;; *) usage;; esac
+    
+    # --- 【核心修改 4】: 大幅简化参数解析循环 ---
+    while [ "$#" -gt 0 ]; do 
+        case "$1" in 
+            --key) SECRET_KEY="$2"; shift 2;; 
+            --server) BACKEND_ADDRESS="$2"; shift 2;; 
+            --version) AGENT_VERSION="$2"; shift 2;; 
+            --no-start) NO_START="true"; shift 1;; 
+            --non-interactive) NON_INTERACTIVE="true"; shift 1;;
+            --tunnel-ws-port) TUNNEL_WS_PORT="$2"; shift 2;;
+            -h|--help) usage;; 
+            *) log_error "未知参数: $1";; 
+        esac; 
+    done
+    
+    case "$COMMAND" in 
+        install) do_install_or_update;; 
+        uninstall) do_uninstall;; 
+        version) ${INSTALL_PATH}/${AGENT_BINARY_NAME} --version;; 
+        *) usage;; 
+    esac
 }
 
 main "$@"
