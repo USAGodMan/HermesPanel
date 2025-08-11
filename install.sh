@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Hermes Agent 一键安装与管理脚本 (v2.4 - 标准化信任模型)
+# 🚀 Hermes Agent 一键安装与管理脚本 (v2.4 - 标准化信任模型)
 #
 # 核心变更:
 # - [移除] 不再处理或安装任何 CA 证书。Agent 将依赖其操作系统的系统信任库。
@@ -24,22 +24,33 @@ CONFIG_DIR="/etc/hermes"
 CONFIG_FILE="${CONFIG_DIR}/agent-config.json"
 SERVICE_NAME="hermes-agent"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-# [修正] 移除 ca-certificates 作为硬性依赖，因为 curl 通常已处理好
 DEPS="curl jq systemd" 
 
-# --- 工具函数 (保持不变) ---
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+# 新增：可选配置项的默认值（与 Agent 默认保持一致）
+ENABLE_H2_TUNNEL="false"
+TUNNEL_WS_PORT="0"
+ENABLE_TUNNEL_MUX="false"
+UDPH2_IDLE_TIMEOUT="3"
+UDPH2_SWEEP_INTERVAL="5"
+UDPH2_MAX_SESSIONS="4096"
+H2_EGRESS_LIMIT_UP="0"
+H2_EGRESS_LIMIT_DOWN="0"
+
+# --- 工具函数 (已添加 Emoji) ---
+log_info() { echo -e "${GREEN}[INFO]${NC} ✨ $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} ⚠️ $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} ❌ $1"; exit 1; }
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 init_sudo() { SUDO=""; if [ "$(id -u)" -ne 0 ]; then if ! command_exists sudo; then log_error "此脚本需要 root 或 sudo 权限。"; fi; SUDO="sudo"; fi; }
 
 # --- 核心功能函数 ---
 usage() {
-    echo "用法: $0 [命令] [选项]"
-    echo "命令: install (默认), uninstall, version"
-    # [修正] 移除 CA 相关选项
-    echo "选项: --key, --server, --version, --non-interactive, --help"
+    echo -e "📋 用法: $0 [命令] [选项]"
+    echo "   命令: install (默认), uninstall, version"
+    echo "   选项: --key, --server, --version, --no-start, --non-interactive, --help"
+    echo "   高级: --enable-h2 (启用 H2 隧道) --tunnel-ws-port <端口> --enable-tunnel-mux"
+    echo "         --udp-h2-idle <秒> --udp-h2-sweep <秒> --udp-h2-max <数量>"
+    echo "         --h2-egress-up-mbps <Mbps> --h2-egress-down-mbps <Mbps>"
     exit 0
 }
 
@@ -47,28 +58,25 @@ install_dependencies() {
     local pkg_manager=""
     if command_exists apt-get; then pkg_manager="apt-get"; elif command_exists yum; then pkg_manager="yum"; elif command_exists dnf; then pkg_manager="dnf"; else log_error "无法检测到包管理器。请手动安装: ${DEPS}"; fi
     if [ "$pkg_manager" == "apt-get" ]; then $SUDO apt-get update; fi
-    for dep in $DEPS; do if ! command_exists "$dep"; then log_info "正在安装依赖: $dep..."; $SUDO "$pkg_manager" install -y "$dep"; fi; done
+    for dep in $DEPS; do if ! command_exists "$dep"; then log_info "正在安装依赖: $dep..."; $SUDO "$pkg_manager" install -y "$dep" > /dev/null; fi; done
+    log_info "📦 依赖检查与安装完成。"
 }
 
-detect_arch() { ARCH=$(uname -m); case $ARCH in x86_64) ARCH="amd64";; aarch64) ARCH="arm64";; *) log_error "不支持的架构: $ARCH";; esac; }
-get_latest_version() { LATEST_VERSION=$(curl -s "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | jq -r '.tag_name'); if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then log_error "无法获取最新版本。"; fi; }
+detect_arch() { ARCH=$(uname -m); case $ARCH in x86_64) ARCH="amd64";; aarch64) ARCH="arm64";; *) log_error "不支持的架构: $ARCH";; esac; log_info "💻 系统架构: ${ARCH}"; }
+get_latest_version() { log_info "📡 正在从 GitHub 获取最新版本号..."; LATEST_VERSION=$(curl -s "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | jq -r '.tag_name'); if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then log_error "无法获取最新版本。"; fi; log_info "🎯 最新版本: ${LATEST_VERSION}"; }
 
 download_and_install() {
     local version_to_install=$1; local download_file="${AGENT_BINARY_NAME}-linux-${ARCH}"; local download_url="https://github.com/${GITHUB_REPO}/releases/download/${version_to_install}/${download_file}"
-    log_info "正在下载 Agent: ${download_url}"; TMP_FILE=$(mktemp); if ! curl -Lfs -o "$TMP_FILE" "$download_url"; then rm -f "$TMP_FILE"; log_error "下载失败。"; fi
-    $SUDO install -m 755 "$TMP_FILE" "${INSTALL_PATH}/${AGENT_BINARY_NAME}"; rm -f "$TMP_FILE";
+    log_info "📥 正在下载 Agent: ${download_url}"; TMP_FILE=$(mktemp); if ! curl -Lfs -o "$TMP_FILE" "$download_url"; then rm -f "$TMP_FILE"; log_error "下载失败。"; fi
+    log_info "🔧 正在安装二进制文件..."; $SUDO install -m 755 "$TMP_FILE" "${INSTALL_PATH}/${AGENT_BINARY_NAME}"; rm -f "$TMP_FILE";
 }
 
-# [已移除] place_ca_certificate 函数已被完全移除，因为它不再被需要。
-
-# create_config 函数
 create_config() {
-    if [ -f "$CONFIG_FILE" ]; then log_warn "配置文件 ${CONFIG_FILE} 已存在，跳过。"; return; fi
-    if [ "$NON_INTERACTIVE" = "true" ]; then if [ -z "$BACKEND_ADDRESS" ] || [ -z "$SECRET_KEY" ]; then log_error "非交互式模式下必须提供 --key 和 --server。"; fi; else read -p "请输入后端 gRPC 地址: " BACKEND_ADDRESS; read -p "请输入节点密钥: " SECRET_KEY; fi
+    if [ -f "$CONFIG_FILE" ]; then log_warn "配置文件 ${CONFIG_FILE} 已存在，跳过创建。"; return; fi
+    if [ "$NON_INTERACTIVE" = "true" ]; then if [ -z "$BACKEND_ADDRESS" ] || [ -z "$SECRET_KEY" ]; then log_error "非交互式模式下必须提供 --key 和 --server。"; fi; else read -p "🤔 请输入后端 gRPC 地址 (例如: my.domain:443): " BACKEND_ADDRESS; read -p "🤔 请输入节点密钥: " SECRET_KEY; fi
     if [ -z "$BACKEND_ADDRESS" ] || [ -z "$SECRET_KEY" ]; then log_error "后端地址和密钥是必填项。"; fi
-    log_info "正在创建配置文件: ${CONFIG_FILE}"; $SUDO mkdir -p "$CONFIG_DIR"; $SUDO chmod 755 "$CONFIG_DIR"
+    log_info "📝 正在创建配置文件: ${CONFIG_FILE}"; $SUDO mkdir -p "$CONFIG_DIR"; $SUDO chmod 755 "$CONFIG_DIR"
     
-    # [核心修正] 生成的 JSON 中不再包含 "ca_cert_path" 字段
     $SUDO tee "$CONFIG_FILE" > /dev/null << EOF
 {
   "backend_address": "${BACKEND_ADDRESS}",
@@ -76,14 +84,22 @@ create_config() {
   "report_interval": 3,
   "log_level": "info",
   "log_format": "json",
-  "insecure_skip_verify": false
+  "insecure_skip_verify": false,
+  "enable_h2_tunnel": ${ENABLE_H2_TUNNEL},
+  "tunnel_ws_port": ${TUNNEL_WS_PORT},
+  "enable_tunnel_mux": ${ENABLE_TUNNEL_MUX},
+  "udp_h2_idle_timeout_seconds": ${UDPH2_IDLE_TIMEOUT},
+  "udp_h2_sweep_interval_seconds": ${UDPH2_SWEEP_INTERVAL},
+  "udp_h2_max_sessions": ${UDPH2_MAX_SESSIONS},
+  "h2_egress_limit_up_mbps": ${H2_EGRESS_LIMIT_UP},
+  "h2_egress_limit_down_mbps": ${H2_EGRESS_LIMIT_DOWN}
 }
 EOF
     $SUDO chmod 644 "$CONFIG_FILE";
 }
 
 create_systemd_service() {
-    log_info "正在创建 systemd 服务..."; $SUDO tee "$SERVICE_FILE" > /dev/null << EOF
+    log_info "⚙️  正在创建 systemd 服务..."; $SUDO tee "$SERVICE_FILE" > /dev/null << EOF
 [Unit]
 Description=Hermes Agent
 After=network.target nss-lookup.target
@@ -101,32 +117,40 @@ EOF
 }
 
 start_and_enable_service() {
-    log_info "重载 systemd 并启动服务..."; $SUDO systemctl daemon-reload; $SUDO systemctl enable "${SERVICE_NAME}"; $SUDO systemctl start "${SERVICE_NAME}"
-    sleep 3; if $SUDO systemctl is-active --quiet "${SERVICE_NAME}"; then log_info "${SERVICE_NAME} 服务启动成功。"; else log_error "${SERVICE_NAME} 启动失败，请检查日志。"; fi
+    log_info "▶️  重载 systemd 并启动服务..."; $SUDO systemctl daemon-reload; $SUDO systemctl enable "${SERVICE_NAME}"; $SUDO systemctl start "${SERVICE_NAME}"
+    sleep 3; if $SUDO systemctl is-active --quiet "${SERVICE_NAME}"; then log_info "✅ ${SERVICE_NAME} 服务启动成功并已设为开机自启。"; else log_error "${SERVICE_NAME} 启动失败，请使用 'sudo journalctl -u ${SERVICE_NAME} -n 100 --no-pager' 查看日志。"; fi
 }
 
 do_install_or_update() {
-    if command_exists "${AGENT_BINARY_NAME}"; then log_info "检测到已安装 Agent，执行更新..."; is_update=true; else log_info "开始安装 Agent..."; is_update=false; fi
+    if command_exists "${AGENT_BINARY_NAME}"; then log_info "🔍 检测到已安装 Agent，准备执行更新..."; is_update=true; else log_info "🚀 准备开始全新安装 Agent..."; is_update=false; fi
     install_dependencies; detect_arch; if [ -z "$AGENT_VERSION" ]; then get_latest_version; AGENT_VERSION=$LATEST_VERSION; fi
-    if [ "$is_update" = true ]; then CURRENT_VERSION=$(${INSTALL_PATH}/${AGENT_BINARY_NAME} --version 2>/dev/null || echo "v0.0.0"); if [ "$CURRENT_VERSION" == "$AGENT_VERSION" ]; then log_info "已是最新版本。"; exit 0; fi; $SUDO systemctl stop "${SERVICE_NAME}" || true; fi
+    if [ "$is_update" = true ]; then CURRENT_VERSION=$(${INSTALL_PATH}/${AGENT_BINARY_NAME} --version 2>/dev/null || echo "v0.0.0"); if [ "$CURRENT_VERSION" == "$AGENT_VERSION" ]; then log_info "🎉 当前已是最新版本 (${CURRENT_VERSION})，无需任何操作。"; exit 0; fi; log_info "🔄 正在从 ${CURRENT_VERSION} 更新至 ${AGENT_VERSION}..."; $SUDO systemctl stop "${SERVICE_NAME}" || true; fi
     download_and_install "$AGENT_VERSION"
-    # [核心修正] 移除对 place_ca_certificate 的调用
     if [ "$is_update" = false ]; then create_config; create_systemd_service; fi
-    if [ "$NO_START" = "true" ]; then log_info "安装完成，未启动服务。"; else start_and_enable_service; fi
+    if [ "$NO_START" = "true" ]; then log_info "🟢 安装完成，根据指令未启动服务。"; else start_and_enable_service; fi
+    log_info "🎉 恭喜！Hermes Agent 已成功安装/更新至版本 ${AGENT_VERSION}。"
 }
 
 do_uninstall() {
-    log_info "开始卸载 Agent..."; $SUDO systemctl stop "${SERVICE_NAME}" || true; $SUDO systemctl disable "${SERVICE_NAME}" || true; $SUDO rm -f "$SERVICE_FILE"; $SUDO rm -f "${INSTALL_PATH}/${AGENT_BINARY_NAME}";
-    if [ -d "$CONFIG_DIR" ]; then read -p "是否删除配置目录 ${CONFIG_DIR}? (y/N): " choice; if [[ "$choice" =~ ^[Yy]$ ]]; then $SUDO rm -rf "$CONFIG_DIR"; fi; fi
-    # [已移除] 不再需要清理系统信任库中的证书
-    $SUDO systemctl daemon-reload; log_info "卸载完成。";
+    log_warn "即将开始卸载 Agent..."; $SUDO systemctl stop "${SERVICE_NAME}" || true; $SUDO systemctl disable "${SERVICE_NAME}" || true;
+    log_info "🗑️ 正在删除服务文件和二进制文件..."; $SUDO rm -f "$SERVICE_FILE"; $SUDO rm -f "${INSTALL_PATH}/${AGENT_BINARY_NAME}";
+    if [ -d "$CONFIG_DIR" ]; then read -p "🤔 是否删除配置目录 ${CONFIG_DIR}? (y/N): " choice; if [[ "$choice" =~ ^[Yy]$ ]]; then $SUDO rm -rf "$CONFIG_DIR"; log_info "🗑️ 配置目录已删除。"; fi; fi
+    $SUDO systemctl daemon-reload; log_info "✅ 卸载完成。";
 }
 
 # --- 主逻辑 ---
 main() {
     init_sudo; COMMAND="install"; if [[ "$1" == "uninstall" || "$1" == "version" ]]; then COMMAND=$1; shift; fi
-    # [核心修正] 移除对 --ca-cert 和 --ca-cert-path 参数的解析
-    while [ "$#" -gt 0 ]; do case "$1" in --key) SECRET_KEY="$2"; shift 2;; --server) BACKEND_ADDRESS="$2"; shift 2;; --version) AGENT_VERSION="$2"; shift 2;; --no-start) NO_START="true"; shift 1;; --non-interactive) NON_INTERACTIVE="true"; shift 1;; -h|--help) usage;; *) log_error "未知参数: $1";; esac; done
+    while [ "$#" -gt 0 ]; do case "$1" in --key) SECRET_KEY="$2"; shift 2;; --server) BACKEND_ADDRESS="$2"; shift 2;; --version) AGENT_VERSION="$2"; shift 2;; --no-start) NO_START="true"; shift 1;; --non-interactive) NON_INTERACTIVE="true"; shift 1;; \
+        --enable-h2) ENABLE_H2_TUNNEL="true"; shift 1;; \
+        --tunnel-ws-port) TUNNEL_WS_PORT="$2"; shift 2;; \
+        --enable-tunnel-mux) ENABLE_TUNNEL_MUX="true"; shift 1;; \
+        --udp-h2-idle) UDPH2_IDLE_TIMEOUT="$2"; shift 2;; \
+        --udp-h2-sweep) UDPH2_SWEEP_INTERVAL="$2"; shift 2;; \
+        --udp-h2-max) UDPH2_MAX_SESSIONS="$2"; shift 2;; \
+        --h2-egress-up-mbps) H2_EGRESS_LIMIT_UP="$2"; shift 2;; \
+        --h2-egress-down-mbps) H2_EGRESS_LIMIT_DOWN="$2"; shift 2;; \
+        -h|--help) usage;; *) log_error "未知参数: $1";; esac; done
     case "$COMMAND" in install) do_install_or_update;; uninstall) do_uninstall;; version) ${INSTALL_PATH}/${AGENT_BINARY_NAME} --version;; *) usage;; esac
 }
 
