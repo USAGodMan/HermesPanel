@@ -25,7 +25,7 @@
   - **🔀 Multiple Strategies**: Built-in support for **Random**, **Round Robin**, **Weighted Round Robin**, **Least Connections**, and **IP Hash** algorithms.
   - **⚖️ Weighted Targets**: Assign different weights to backend services for fine-grained, proportional traffic distribution.
 - **Secure Tunneling**:
-  - **🔒 mTLS Encryption**: All tunnel traffic is end-to-end encrypted using mutual TLS (mTLS) to guarantee data security.
+  - **🔒 Aether Encryption**: All tunnel traffic is end-to-end encrypted using mutual TLS (Aether) to guarantee data security.
   - **🌍 Global Networking**: Effortlessly build a distributed forwarding network across different regions and cloud providers.
 - **Intuitive Web UI**:
   - **📊 Real-time Monitoring**: A comprehensive dashboard to monitor node status (CPU, memory, network), traffic statistics, and performance metrics in real-time.
@@ -90,4 +90,4 @@ Please read our [**Contributing Guidelines**](./CONTRIBUTING.md) to get started.
 
 ## 📄 License
 
-This project is licensed under the [MIT License](./LICENSE).
+This project is licensed under the [Apache License 2.0](./LICENSE).
