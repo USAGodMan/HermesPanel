@@ -1,39 +1,52 @@
-# frontend/nginx.conf.template (修正版)
+# frontend/nginx.conf.template
 
+# --- Upstream 定义 ---
 upstream grpc_backend {
-    # 将流量转发给 backend 服务的 50051 端口
     server backend:50051;
+    keepalive 32;
 }
 
+# --- gRPC 服务配置 (Port 50051) ---
 server {
-    # 在 50051 端口上监听 gRPC 流量
+    # [修正] 移除 http2 参数
     listen 50051 ssl;
+    listen [::]:50051 ssl;
+    
+    # [修正] 使用独立指令开启 HTTP/2
     http2 on;
-    server_name ${NGIN-X_HOST} grpc.${NGINX_HOST};
 
-    # 使用与主站相同的证书
+    server_name ${NGINX_HOST} grpc.${NGINX_HOST};
+
+    # SSL 配置
     ssl_certificate /etc/letsencrypt/live/${NGINX_HOST}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${NGINX_HOST}/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
-
-    # 代理 gRPC 请求
+    
+    # [优化] Mozilla Intermediate 兼容性列表
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    
+    # gRPC 设置
     location / {
         grpc_pass grpc://grpc_backend;
-        # 设置必要的头信息
+        
         grpc_set_header Host $host;
         grpc_set_header X-Real-IP $remote_addr;
         grpc_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        grpc_set_header X-Forwarded-Proto $scheme;
+        
+        # 超时设置
+        grpc_read_timeout 300s;
+        grpc_send_timeout 300s;
+        grpc_socket_keepalive on;
     }
 }
 
-# --- HTTP 到 HTTPS 的永久重定向 ---
+# --- HTTP -> HTTPS 重定向 ---
 server {
     listen 80;
     listen [::]:80;
-    server_name ${NGINX_HOST};
+    server_name ${NGINX_HOST} grpc.${NGINX_HOST};
 
-    # 推荐：为 acme-challenge (Let's Encrypt 续期) 设置一个例外
+    # ACME Challenge
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
     }
@@ -43,77 +56,86 @@ server {
     }
 }
 
-
-# --- HTTPS 主服务配置 ---
+# --- 主 Web 服务 (Port 443) ---
 server {
-    # 【核心】监听 443 端口并启用 SSL/TLS
+    # [修正] 移除 http2 参数
     listen 443 ssl;
     listen [::]:443 ssl;
+    
+    # [修正] 使用独立指令开启 HTTP/2
     http2 on;
     
     server_name ${NGINX_HOST};
 
-    # 【核心】指定证书和私钥的路径 (这些路径是容器内的路径)
     ssl_certificate /etc/letsencrypt/live/${NGINX_HOST}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${NGINX_HOST}/privkey.pem;
 
-    # --- SSL/TLS 安全增强配置 (推荐) ---
+    # SSL 优化
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:ECDHE-RSA-AES128-GCM-SHA256';
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
     ssl_session_timeout 1d;
     ssl_session_cache shared:SSL:10m;
     ssl_stapling on;
     ssl_stapling_verify on;
-    resolver 8.8.8.8 1.1.1.1 valid=300s;
+    
+    # Docker 环境 DNS 解析器 (127.0.0.11 是 Docker 内置 DNS)
+    # 用于 OCSP Stapling 解析外部域名
+    resolver 127.0.0.11 8.8.8.8 valid=300s;
     resolver_timeout 5s;
+
+    # 文件上传限制
+    client_max_body_size 50M;
+
+    # 安全头
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
+    add_header X-XSS-Protection "1; mode=block";
 
     server_tokens off;
     root /usr/share/nginx/html;
     index index.html;
 
-    # --- 性能优化：Gzip 压缩 ---
+    # Gzip
     gzip on;
     gzip_vary on;
     gzip_proxied any;
     gzip_comp_level 6;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
     gzip_min_length 1000;
-    gzip_disable "msie6";
 
-    # --- 静态资源处理与缓存 ---
-    # 【核心修正】将静态资源 location 块移到外部，与 location / 平级
-
-    # 为文件名中带有哈希值的文件 (如 main.a1b2c3d4.js) 设置长缓存
+    # 静态资源缓存
     location ~* \.(?:css|js)$ {
         expires 1y;
-        add_header Cache-Control "public";
-        # 因为这些文件是物理存在的，所以不需要 try_files 回退
-        # 如果文件不存在，Nginx 会自动返回 404
-    }
-
-    # 为图片等其他媒体资源设置缓存
-    location ~* \.(?:ico|jpg|jpeg|png|gif|svg|webp)$ {
-        expires 1d;
+        access_log off;
         add_header Cache-Control "public";
     }
 
-    # --- SPA 路由回退 ---
-    # 这个 location 块应该放在所有静态资源 location 之后
-    location / {
-        try_files $uri $uri/ /index.html;
+    location ~* \.(?:ico|jpg|jpeg|png|gif|svg|webp|woff|woff2|ttf|eot)$ {
+        expires 30d;
+        access_log off;
+        add_header Cache-Control "public";
     }
 
-    # --- API 和 WebSocket 代理 ---
+    # API 反向代理
     location /api/v1 {
         proxy_pass http://backend:8080;
         proxy_http_version 1.1;
+        
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
+        proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    # SPA 路由兜底
+    location / {
+        try_files $uri $uri/ /index.html;
     }
 }
