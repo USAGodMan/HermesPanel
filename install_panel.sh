@@ -1,282 +1,304 @@
 #!/bin/bash
 set -e
 
-# 解决 macOS 下 tr 可能出现的非法字节序列问题
-export LANG=en_US.UTF-8
-export LC_ALL=C
+# ==============================================================================
+# 🚀 HermesPanel 一键安装与管理脚本 [旗舰版 v2.1]
+#
+# 修复日志:
+# - [修复] 修复了在更新/备份模式下 DOCKER_CMD 变量未初始化的问题
+# - [优化] 将 Docker 检测逻辑提前，确保全流程可用
+# ==============================================================================
 
-# 全局下载地址配置（HermesPanel GitHub）
+# --- 全局变量 ---
+PROJECT_DIR="/opt/HermesPanel"
 GITHUB_REPO_URL="https://github.com/USAGodMan/HermesPanel.git"
+ENV_FILE="${PROJECT_DIR}/.env"
 
-# 中国镜像（ghfast.top）
-COUNTRY=$(curl -s --connect-timeout 5 https://ipinfo.io/country || echo "US")
-if [ "$COUNTRY" = "CN" ]; then
-    GITHUB_REPO_URL="https://ghfast.top/https://github.com/USAGodMan/HermesPanel.git"
-fi
+# 颜色定义
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-PROJECT_DIR="HermesPanel"
+# 全局 Docker 命令变量 (初始化为空)
+DOCKER_CMD=""
 
-# 工具函数
-log_info() { echo -e "\033[0;32m✅ [信息] $1\033[0m"; }
-log_warn() { echo -e "\033[1;33m⚠️ [警告] $1\033[0m"; }
-log_error() { echo -e "\033[0;31m❌ [错误] $1\033[0m"; exit 1; }
+# --- 基础工具函数 ---
+log_info() { echo -e "${GREEN}[INFO]${NC} ✨ $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} ⚠️ $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} ❌ $1"; exit 1; }
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
-# 检查 Docker
-check_docker() {
-    if command -v docker-compose >/dev/null 2>&1; then
-        DOCKER_CMD="docker-compose"
-    elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-        DOCKER_CMD="docker compose"
-    else
-        log_error "未检测到 Docker。请先安装。"
-    fi
-    log_info "检测到 Docker 命令：$DOCKER_CMD"
-}
+# --- 核心检查 ---
 
-# 检测 IPv6 支持
-check_ipv6_support() {
-    log_info "🔍 检测 IPv6 支持..."
-    if ip -6 addr show | grep -v "scope link" | grep -q "inet6" 2>/dev/null || ifconfig 2>/dev/null | grep -v "fe80:" | grep -q "inet6"; then
-        log_info "✅ 支持 IPv6"
-        return 0
-    else
-        log_warn "⚠️ 未支持 IPv6"
-        return 1
+check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        log_error "此脚本需要 root 权限运行。"
     fi
 }
 
-# 配置 Docker IPv6
-configure_docker_ipv6() {
-    log_info "🔧 配置 Docker IPv6..."
-    OS_TYPE=$(uname -s)
-    if [[ "$OS_TYPE" == "Darwin" ]]; then
-        log_info "✅ macOS 默认支持 IPv6"
-        return 0
-    fi
-    DOCKER_CONFIG="/etc/docker/daemon.json"
-    SUDO_CMD=$( [ $EUID -ne 0 ] && echo "sudo" || echo "" )
-    if [ -f "$DOCKER_CONFIG" ] && grep -q '"ipv6"' "$DOCKER_CONFIG"; then
-        log_info "✅ 已配置 IPv6"
-        return 0
-    fi
-    $SUDO_CMD mkdir -p /etc/docker
-    if command -v jq >/dev/null 2>&1; then
-        echo '{}' | jq '. + {"ipv6": true, "fixed-cidr-v6": "fd00::/80"}' | $SUDO_CMD tee "$DOCKER_CONFIG" >/dev/null
-    else
-        echo '{"ipv6": true, "fixed-cidr-v6": "fd00::/80"}' | $SUDO_CMD tee "$DOCKER_CONFIG" >/dev/null
-    fi
-    if command -v systemctl >/dev/null 2>&1; then
-        $SUDO_CMD systemctl restart docker
-    fi
-    sleep 5
-}
-
-# 等待健康检查
-wait_for_health() {
-    local container=$1
-    local timeout=$2
-    local i=1
-    while [ $i -le $timeout ]; do
-        if docker ps --format "{{.Names}}" | grep -q "^$container$"; then
-            HEALTH=$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || echo "unknown")
-            if [[ "$HEALTH" == "healthy" ]]; then
-                log_info "$container 服务健康"
-                return 0
-            fi
-        fi
-        if [ $((i % 15)) -eq 1 ]; then
-            log_warn "等待 $container ... ($i/$timeout) 状态：$HEALTH"
-        fi
-        sleep 1
-        ((i++))
+check_dependencies() {
+    local deps="curl git grep sed awk openssl"
+    local missing=""
+    for dep in $deps; do
+        if ! command_exists "$dep"; then missing="$missing $dep"; fi
     done
-    log_error "$container 启动超时 ($timeout s)"
-}
-
-# 获取 DB 配置
-get_db_config() {
-    if [ -f ".env" ]; then
-        source .env
-    fi
-    DB_NAME=${MYSQL_DATABASE:-hermes_db}
-    DB_USER=${MYSQL_USER:-hermes_user}
-    DB_PASSWORD=${MYSQL_PASSWORD}
-    DB_HOST=${MYSQL_HOST:-mysql}
-    DB_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
-    if [[ -z "$DB_PASSWORD" || -z "$DB_USER" || -z "$DB_NAME" ]]; then
-        log_error "DB 配置不完整"
+    
+    if [ -n "$missing" ]; then
+        log_warn "缺少依赖: $missing，尝试自动安装..."
+        if command_exists apt-get; then
+            apt-get update && apt-get install -y $missing
+        elif command_exists yum; then
+            yum install -y $missing
+        else
+            log_error "请手动安装依赖: $missing"
+        fi
     fi
 }
 
-# 生成随机密钥
-generate_random() { LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*()_+-=[]{}|;:,.<>?`~' </dev/urandom | head -c $1; }
+# 【核心修复】不仅检测，还负责初始化 DOCKER_CMD 变量
+ensure_docker_ready() {
+    # 如果变量已有值，直接返回，避免重复检测
+    if [ -n "$DOCKER_CMD" ]; then return; fi
 
-# 显示菜单
-show_menu() {
-    echo -e "\n\033[0;34m=======================================================${NC}"
-    echo -e "\033[0;34m      HermesPanel 🚀 交互式管理脚本                 ${NC}"
-    echo -e "\033[0;34m=======================================================${NC}"
-    echo "1. 安装面板"
-    echo "2. 更新面板"
-    echo "3. 卸载面板"
-    echo "4. 导出数据库备份"
-    echo "5. 配置 SSL 证书"
-    echo "6. 退出"
-    echo -e "\033[0;34m=======================================================${NC}"
-}
+    # 1. 检测 Docker 引擎
+    if ! command_exists docker; then
+        log_info "正在安装 Docker..."
+        curl -fsSL https://get.docker.com | bash
+        systemctl enable docker
+        systemctl start docker
+    fi
 
-# 删除脚本自身
-delete_self() {
-    log_info "🗑️ 清理脚本文件..."
-    SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
-    sleep 1
-    rm -f "$SCRIPT_PATH" && log_info "✅ 脚本已删除" || log_warn "⚠️ 删除失败"
-}
-
-# 安装
-install_panel() {
-    log_info "🚀 开始安装..."
-    check_docker
-    if check_ipv6_support; then configure_docker_ipv6; fi
-
-    # 交互配置
-    read -p "主域名 (默认: panel.example.com): " NGINX_HOST
-    NGINX_HOST=${NGINX_HOST:-panel.example.com}
-    read -p "邮箱 (SSL 用，默认: admin@example.com): " EMAIL
-    EMAIL=${EMAIL:-admin@example.com}
-    read -p "HTTP 端口 (默认: 8080): " HTTP_PORT
-    HTTP_PORT=${HTTP_PORT:-8080}
-    read -p "gRPC 端口 (默认: 50051): " GRPC_PORT
-    GRPC_PORT=${GRPC_PORT:-50051}
-
-    # 生成密钥
-    JWT_SECRET_KEY=$(generate_random 50)
-    AES_ENCRYPTION_KEY=$(generate_random 32)
-    MYSQL_ROOT_PASSWORD=$(generate_random 32)
-    MYSQL_PASSWORD=$(generate_random 32)
-
-    # 下载项目
-    if [ -d "$PROJECT_DIR" ]; then
-        cd "$PROJECT_DIR" && git pull || log_error "更新失败"
+    # 2. 检测 Docker Compose 并赋值变量
+    if docker compose version >/dev/null 2>&1; then
+        DOCKER_CMD="docker compose"
+    elif command_exists docker-compose; then
+        DOCKER_CMD="docker-compose"
     else
-        git clone "$GITHUB_REPO_URL" "$PROJECT_DIR" || log_error "克隆失败"
+        log_info "正在安装 Docker Compose..."
+        curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        chmod +x /usr/local/bin/docker-compose
+        DOCKER_CMD="docker-compose"
+    fi
+    
+    # log_info "Docker 环境就绪: $DOCKER_CMD"
+}
+
+check_ipv6_support() {
+    if [ -f /proc/net/if_inet6 ]; then
+        # 检查 Docker daemon.json 是否开启 IPv6
+        if [ ! -f /etc/docker/daemon.json ]; then
+            log_info "检测到 IPv6 环境，正在配置 Docker 支持..."
+            # 确保目录存在
+            mkdir -p /etc/docker
+            echo '{"ipv6": true, "fixed-cidr-v6": "fd00::/80"}' > /etc/docker/daemon.json
+            systemctl reload docker
+        fi
+    fi
+}
+
+# --- 业务逻辑 ---
+
+generate_password() {
+    openssl rand -base64 24 | tr -d '/+=' | head -c "$1"
+}
+
+# 安全写入 .env
+write_env() {
+    local key=$1
+    local val=$2
+    if grep -q "^${key}=" "$ENV_FILE"; then
+        sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
+    else
+        echo "${key}=${val}" >> "$ENV_FILE"
+    fi
+}
+
+install_panel() {
+    log_info "🚀 开始安装 HermesPanel..."
+    check_root
+    check_dependencies
+    ensure_docker_ready # 确保 Docker 可用
+    check_ipv6_support
+
+    # 1. 交互式配置
+    echo ""
+    echo -e "${BLUE}--- 配置向导 ---${NC}"
+    read -p "请输入面板域名 (例如 panel.example.com): " NGINX_HOST
+    [ -z "$NGINX_HOST" ] && log_error "域名不能为空"
+    
+    read -p "请输入管理员邮箱 (用于 SSL 申请): " EMAIL
+    [ -z "$EMAIL" ] && EMAIL="admin@localhost"
+
+    read -p "HTTP 端口 (默认 8080): " HTTP_PORT
+    [ -z "$HTTP_PORT" ] && HTTP_PORT=8080
+
+    read -p "gRPC 端口 (默认 50051): " GRPC_PORT
+    [ -z "$GRPC_PORT" ] && GRPC_PORT=50051
+
+    # 2. 下载代码
+    if [ -d "$PROJECT_DIR" ]; then
+        log_warn "目录 $PROJECT_DIR 已存在，正在更新代码..."
+        cd "$PROJECT_DIR"
+        git pull
+    else
+        git clone "$GITHUB_REPO_URL" "$PROJECT_DIR"
         cd "$PROJECT_DIR"
     fi
 
-    # 配置 .env
-    cp .env.example .env
-    sed -i "s|NGINX_HOST=.*|NGINX_HOST=$NGINX_HOST|" .env
-    sed -i "s|EMAIL=.*|EMAIL=$EMAIL|" .env  # 假设 .env 有 EMAIL
-    sed -i "s|HTTP_PORT=.*|HTTP_PORT=$HTTP_PORT|" .env
-    sed -i "s|GRPC_PORT=.*|GRPC_PORT=$GRPC_PORT|" .env
-    sed -i "s|JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$JWT_SECRET_KEY|" .env
-    sed -i "s|AES_ENCRYPTION_KEY=.*|AES_ENCRYPTION_KEY=$AES_ENCRYPTION_KEY|" .env
-    sed -i "s|MYSQL_ROOT_PASSWORD=.*|MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD|" .env
-    sed -i "s|MYSQL_PASSWORD=.*|MYSQL_PASSWORD=$MYSQL_PASSWORD|" .env
-    sed -i "s|DB_TYPE=.*|DB_TYPE=mysql|" .env
-    sed -i "s|MYSQL_DATABASE=.*|MYSQL_DATABASE=hermes_db|" .env
-    sed -i "s|MYSQL_USER=.*|MYSQL_USER=hermes_user|" .env
-
-    # 启动
-    $DOCKER_CMD up -d --build
-    wait_for_health backend 90
-    wait_for_health mysql 60  # 假设容器名为 mysql
-
-    # SSL
-    obtain_certificate
-
-    # 显示 admin
-    sleep 15
-    ADMIN_INFO=$( $DOCKER_CMD logs --tail=100 backend | grep -iE "(admin|initial|default|账户|password|用户名|credential|login)" | tail -10 )
-    echo -e "\n${GREEN}🎉 安装完成！访问: https://${NGINX_HOST}${NC}"
-    if [ -n "$ADMIN_INFO" ]; then
-        echo -e "${YELLOW}📋 初始管理员账户:${NC}"
-        echo "$ADMIN_INFO"
-    else
-        log_warn "未找到账户信息，请运行 '$DOCKER_CMD logs backend'"
+    # 3. 生成配置
+    if [ ! -f "$ENV_FILE" ]; then
+        cp .env.example "$ENV_FILE" 2>/dev/null || touch "$ENV_FILE"
     fi
+
+    # 生成随机密钥
+    JWT_SECRET=$(generate_password 32)
+    AES_KEY=$(generate_password 32)
+    DB_ROOT_PWD=$(generate_password 24)
+    DB_PWD=$(generate_password 24)
+
+    # 写入配置
+    log_info "📝 生成配置文件..."
+    write_env "NGINX_HOST" "$NGINX_HOST"
+    write_env "EMAIL" "$EMAIL"
+    write_env "HTTP_PORT" "$HTTP_PORT"
+    write_env "GRPC_PORT" "$GRPC_PORT"
+    write_env "JWT_SECRET_KEY" "$JWT_SECRET"
+    write_env "AES_ENCRYPTION_KEY" "$AES_KEY"
+    write_env "MYSQL_ROOT_PASSWORD" "$DB_ROOT_PWD"
+    write_env "MYSQL_PASSWORD" "$DB_PWD"
+    write_env "MYSQL_DATABASE" "hermes_db"
+    write_env "MYSQL_USER" "hermes_user"
+
+    # 4. 启动服务
+    log_info "🐳 启动 Docker 容器..."
+    $DOCKER_CMD up -d --build --remove-orphans
+
+    # 5. SSL 申请 (尝试)
+    log_info "🔒 正在尝试申请 SSL 证书..."
+    if command_exists certbot; then
+        $DOCKER_CMD stop nginx 2>/dev/null || true
+        if certbot certonly --standalone -d "$NGINX_HOST" -d "grpc.$NGINX_HOST" --email "$EMAIL" --agree-tos --non-interactive; then
+            log_info "✅ SSL 证书获取成功！"
+        else
+            log_warn "SSL 申请失败。请检查域名解析是否正确，或防火墙是否开放 80 端口。"
+        fi
+        $DOCKER_CMD start nginx 2>/dev/null || true
+    else
+        log_warn "未检测到 Certbot，跳过自动 SSL 申请。"
+    fi
+
+    # 6. 完成提示
+    log_info "🎉 安装完成！"
+    echo -e "   🏠 面板地址: http://${NGINX_HOST}:${HTTP_PORT}"
+    echo -e "   🔑 初始账号信息请查看后台日志: $DOCKER_CMD logs backend"
 }
 
-# 更新
 update_panel() {
-    log_info "🔄 开始更新..."
-    check_docker
-    if [ ! -d "$PROJECT_DIR" ]; then log_error "项目未安装"; fi
+    if [ ! -d "$PROJECT_DIR" ]; then log_error "未找到安装目录，无法更新。"; fi
+    
+    ensure_docker_ready # 【修复】更新前确保拿到 Docker 命令
+    
     cd "$PROJECT_DIR"
-    git pull || log_error "Git pull 失败"
+    log_info "🔄 拉取最新代码..."
+    git pull
+    
+    log_info "🐳 重建容器..."
     $DOCKER_CMD down
     $DOCKER_CMD pull
-    $DOCKER_CMD up -d --build
-    wait_for_health backend 90
-    wait_for_health mysql 60
-    log_info "✅ 更新完成"
+    $DOCKER_CMD up -d --build --remove-orphans
+    $DOCKER_CMD image prune -f
+    
+    log_info "✅ 更新完毕。"
 }
 
-# 卸载
 uninstall_panel() {
-    read -p "确认卸载？删除所有数据 (y/N): " confirm
-    if [[ $confirm =~ ^[Yy]$ ]]; then
-        cd "$PROJECT_DIR" 2>/dev/null || true
-        $DOCKER_CMD down --rmi all -v --remove-orphans
-        cd .. && rm -rf "$PROJECT_DIR"
-        log_info "✅ 卸载完成"
+    echo -e "${RED}⚠️  警告: 此操作将删除所有数据，包括数据库！${NC}"
+    read -p "确认卸载? (输入 'yes' 确认): " confirm
+    if [ "$confirm" != "yes" ]; then exit 0; fi
+
+    if [ -d "$PROJECT_DIR" ]; then
+        cd "$PROJECT_DIR"
+        ensure_docker_ready # 【修复】卸载前也要确保拿到命令
+        $DOCKER_CMD down -v 2>/dev/null || true
+        cd ..
+        rm -rf "$PROJECT_DIR"
+        log_info "✅ 卸载完成。"
+    else
+        log_error "未找到安装目录。"
     fi
 }
 
-# 备份
-export_backup() {
-    log_info "📄 导出备份..."
-    get_db_config
+backup_data() {
+    if [ ! -d "$PROJECT_DIR" ]; then log_error "未安装。"; fi
+    
+    ensure_docker_ready # 【修复】备份前确保拿到命令
+    
     cd "$PROJECT_DIR"
-    SQL_FILE="hermes_backup_$(date +%Y%m%d_%H%M%S).sql"
-    if docker exec -i mysql mysqldump -u "$DB_USER" -p"$DB_PASSWORD" --single-transaction --routines --triggers "$DB_NAME" > "../$SQL_FILE"; then
-        log_info "✅ 备份: ../$SQL_FILE ($(du -h "../$SQL_FILE" | cut -f1))"
-    else
-        log_error "备份失败"
+    source "$ENV_FILE"
+    BACKUP_FILE="../hermes_backup_$(date +%Y%m%d_%H%M%S).sql"
+    
+    # 智能查找 MySQL 容器名
+    CONTAINER_NAME=$($DOCKER_CMD ps -q --filter "name=mysql" | head -n 1)
+    if [ -z "$CONTAINER_NAME" ]; then
+        CONTAINER_NAME=$(docker ps --format '{{.Names}}' | grep -i "mysql" | head -n 1)
     fi
-    # 备份 .env
-    cp .env "../hermes_env_$(date +%Y%m%d_%H%M%S).backup"
-    log_info "✅ .env 已备份"
-}
 
-# SSL 配置
-obtain_certificate() {
-    get_db_config  # 仅需 NGINX_HOST/EMAIL，从 .env source
-    CERT_PATH="/etc/letsencrypt/live/${NGINX_HOST}/fullchain.pem"
-    if [ -f "$CERT_PATH" ]; then
-        log_info "✅ SSL 已存在"
-        return
-    fi
-    systemctl stop nginx apache2 2>/dev/null
-    if command -v certbot >/dev/null 2>&1; then
-        certbot certonly --standalone -d "${NGINX_HOST}" -d "grpc.${NGINX_HOST}" --email "$EMAIL" --agree-tos -n
-        if [ -f "$CERT_PATH" ]; then
-            log_info "✅ SSL 获取成功"
-            $DOCKER_CMD restart  # 重启以加载证书
-        else
-            log_error "SSL 失败"
-        fi
+    if [ -z "$CONTAINER_NAME" ]; then log_error "未找到运行中的 MySQL 容器。"; fi
+
+    log_info "📦 正在导出数据库从容器: $CONTAINER_NAME ..."
+    docker exec "$CONTAINER_NAME" mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" --all-databases > "$BACKUP_FILE"
+    
+    if [ $? -eq 0 ]; then
+        log_info "✅ 备份成功: $BACKUP_FILE"
     else
-        log_error "Certbot 未安装"
+        log_error "备份失败，请检查容器日志。"
     fi
 }
 
-# 主逻辑
+show_menu() {
+    clear
+    echo -e "${BLUE}"
+    echo "  _   _                                ____                  _ "
+    echo " | | | | ___ _ __ _ __ ___   ___  ___ |  _ \ __ _ _ __   ___| |"
+    echo " | |_| |/ _ \ '__| '_ \` _ \ / _ \/ __|| |_) / _\` | '_ \ / _ \ |"
+    echo " |  _  |  __/ |  | | | | | |  __/\__ \|  __/ (_| | | | |  __/ |"
+    echo " |_| |_|\___|_|  |_| |_| |_|\___||___/|_|   \__,_|_| |_|\___|_|"
+    echo -e "${NC}"
+    echo -e "  HermesPanel 管理脚本 ${YELLOW}[v2.1]${NC}"
+    echo "----------------------------------------"
+    echo " 1. 安装面板"
+    echo " 2. 更新面板"
+    echo " 3. 卸载面板"
+    echo " 4. 备份数据库"
+    echo " 5. 查看日志"
+    echo " 0. 退出"
+    echo "----------------------------------------"
+    read -p "请输入选项: " choice
+    case $choice in
+        1) install_panel ;;
+        2) update_panel ;;
+        3) uninstall_panel ;;
+        4) backup_data ;;
+        5) 
+           ensure_docker_ready # 【修复】看日志也要命令
+           cd "$PROJECT_DIR"
+           $DOCKER_CMD logs -f --tail 100 backend 
+           ;;
+        0) exit 0 ;;
+        *) log_warn "无效选项" ;;
+    esac
+}
+
+# --- 入口 ---
 main() {
+    check_root
+    # CLI 模式
+    if [ "$1" == "install" ]; then install_panel; exit 0; fi
+    if [ "$1" == "update" ]; then update_panel; exit 0; fi
+    
+    # 菜单模式
     while true; do
         show_menu
-        read -p "选项 (1-6): " choice
-        case $choice in
-            1) install_panel ;;
-            2) update_panel ;;
-            3) uninstall_panel ;;
-            4) export_backup ;;
-            5) obtain_certificate ;;
-            6) delete_self; exit 0 ;;
-            *) log_warn "无效选项" ;;
-        esac
+        read -p "按回车键继续..."
     done
 }
 
-main
+main "$@"
